@@ -50,8 +50,13 @@ jobs:
 
       - name: Install Android SDK components
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKM" ]; then
+            SDKM="$(find "$ANDROID_HOME" /usr/local/lib/android-sdk /opt/android-sdk -name sdkmanager -type f 2>/dev/null | head -1)"
+          fi
+          echo "using sdkmanager: $SDKM"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0" > /dev/null
 
       - name: Generate audio + launcher icon
         run: |
