@@ -1,0 +1,649 @@
+===FILE:app/src/main/assets/app/app.js===
+/* ============ INSTEAD — app logic (works in browser + Android WebView) ============ */
+'use strict';
+
+const AND = window.Android || null;              // native bridge (Android only)
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+
+/* ---------------- data ---------------- */
+const SONGS = [
+  { id:'s1', title:'Midnight Monsoon',  artist:'Aarav Sen',        genre:'Indie',      file:'midnight_monsoon.wav', cover:'c1', plays:'2.4M plays' },
+  { id:'s2', title:'Chai at 3 AM',     artist:'Meera Kaur',        genre:'Indie',      file:'chai_at_3am.wav',      cover:'c3', plays:'980K plays' },
+  { id:'s3', title:'Neon Bazaar',      artist:'The Wandering Six', genre:'Electronic',  file:'neon_bazaar.wav',      cover:'c2', plays:'860K plays' },
+  { id:'s4', title:'Rooftop Rain',     artist:'Dhruv & The City',  genre:'Lo-fi',      file:'rooftop_rain.wav',     cover:'c4', plays:'1.1M plays' },
+  { id:'s5', title:'Highway Gully',    artist:'MC Riyaan',         genre:'Hip-hop',    file:'highway_gully.wav',    cover:'c5', plays:'740K plays' },
+  { id:'s6', title:'Desi Downtempo',   artist:'Tara Nair',         genre:'Electronic',  file:'desi_downtempo.wav',   cover:'c6', plays:'520K plays' },
+];
+
+const store = {
+  get(k, d) { try { const v = JSON.parse(localStorage.getItem('instead_' + k)); return v === null || v === undefined ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('instead_' + k, JSON.stringify(v)); } catch (e) {} }
+};
+
+const state = {
+  uploads: store.get('uploads', []),            // [{id,title,artist,genre,path}]
+  liked: store.get('liked', []),
+  downloaded: store.get('downloaded', []),
+  playlists: store.get('playlists', [{ name:'Monsoon Moods', songs:['s1','s2','s4'] }]),
+  current: null, playing: false, posMs: 0, durMs: 0, simTimer: null, uploading: null,
+};
+store.set('playlists', state.playlists);
+
+function allSongs() { return SONGS.concat(state.uploads); }
+function songById(id) { return allSongs().find(s => s.id === id); }
+function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); }
+
+/* ---------------- icons ---------------- */
+const noteSvg = (size) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none"><path d="M9 18.5V6l10-2v12" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><circle cx="6.5" cy="18.5" r="2.8" fill="#fff"/><circle cx="16.5" cy="16" r="2.8" fill="#fff"/></svg>`;
+
+/* ---------------- scale to viewport ---------------- */
+function fit() {
+  const s = window.innerWidth / 1080;
+  const f = $('#frame');
+  f.style.transform = `scale(${s})`;
+  f.style.height = (window.innerHeight / s) + 'px';
+  f.style.width = '1080px';
+}
+window.addEventListener('resize', fit);
+
+/* ---------------- toast ---------------- */
+let toastT;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout(toastT);
+  toastT = setTimeout(() => t.classList.remove('on'), 2600);
+}
+
+/* ---------------- navigation ---------------- */
+function show(id) {
+  $$('.screen').forEach(s => s.classList.remove('on'));
+  $('#screen-' + id).classList.add('on');
+  $$('.nav-item[data-go]').forEach(n => n.classList.toggle('active', n.dataset.go === id));
+  $('#screen-' + id).scrollTop = 0;
+}
+document.addEventListener('click', e => {
+  const go = e.target.closest('[data-go]');
+  if (go) { show(go.dataset.go); return; }
+});
+function back() {
+  if ($('#share-sheet').classList.contains('on')) { closeSheets(); return; }
+  if ($('#pl-sheet').classList.contains('on')) { closeSheets(); return; }
+  const on = $$('.screen.on')[0];
+  if (!on || on.id === 'screen-home') { if (AND) AND.exitApp(); return; }
+  show('home');
+}
+window.app = { back };
+window.app.toastMsg = toast;
+window.app.toast = toast;
+
+/* ---------------- rendering ---------------- */
+function songRow(song, opts = {}) {
+  const isCurrent = state.current === song.id;
+  const saved = state.downloaded.includes(song.id);
+  const row = document.createElement('div');
+  row.className = 'song-row';
+  row.innerHTML = `
+    <div class="row-icon ${isCurrent && state.playing ? 'active' : ''}">${isCurrent && state.playing ? '<div class="eq"><i></i><i></i><i></i><i></i></div>' : `<div class="cover ${song.cover}" style="width:88px;height:88px;">${noteSvg(40)}</div>`}</div>
+    <div class="meta">
+      <div class="title">${song.title}</div>
+      <div class="artist">${song.artist} · ${song.genre}${saved ? ' · ✓ saved' : ''}</div>
+    </div>
+    <button class="row-act" data-addpl="${song.id}" title="Add to playlist">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#98A2B3" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>`;
+  row.addEventListener('click', e => {
+    if (e.target.closest('[data-addpl]')) return;
+    playSong(song.id);
+  });
+  return row;
+}
+
+function renderHome() {
+  const hour = new Date().getHours();
+  $('#greeting').textContent = (hour < 12 ? 'Good morning,' : hour < 17 ? 'Good afternoon,' : 'Good evening,');
+  const feat = $('#featured');
+  feat.innerHTML = '';
+  allSongs().slice(0, 4).forEach((s, i) => {
+    const d = document.createElement('div');
+    d.className = 'fcard ' + s.cover;
+    d.innerHTML = `<div class="tag">${i === 0 ? '★ #1 TRENDING' : '✦ ' + s.genre.toUpperCase()}</div>
+      <div><h3>${s.title}</h3><p>${s.artist} · ${s.plays || 'new upload'}</p></div>
+      <div class="play-fab"><svg width="46" height="46" viewBox="0 0 24 24" fill="#0A0E14"><path d="M8 5.5v13l11-6.5z"/></svg></div>`;
+    d.addEventListener('click', () => playSong(s.id));
+    feat.appendChild(d);
+  });
+  const list = $('#home-list');
+  list.innerHTML = '';
+  allSongs().forEach(s => list.appendChild(songRow(s)));
+}
+
+function renderSearch() {
+  const q = ($('#search-input').value || '').toLowerCase().trim();
+  const chips = ['All', ...new Set(allSongs().map(s => s.genre))];
+  const chipEl = $('#genre-chips');
+  chipEl.innerHTML = '';
+  chips.forEach(c => {
+    const d = document.createElement('div');
+    d.className = 'chip' + ((state.chip || 'All') === c ? ' active' : '');
+    d.textContent = c;
+    d.onclick = () => { state.chip = c; renderSearch(); };
+    chipEl.appendChild(d);
+  });
+  let res = allSongs();
+  if (state.chip && state.chip !== 'All') res = res.filter(s => s.genre === state.chip);
+  if (q) res = res.filter(s => (s.title + ' ' + s.artist + ' ' + s.genre).toLowerCase().includes(q));
+  $('#search-count').textContent = q ? `${res.length} result${res.length === 1 ? '' : 's'} for “${q}”` : 'All songs';
+  const list = $('#search-list');
+  list.innerHTML = '';
+  if (!res.length) { list.innerHTML = '<div class="empty">No songs found — try “monsoon”, “lo-fi”, or an artist name.</div>'; return; }
+  res.forEach(s => list.appendChild(songRow(s)));
+}
+
+function renderLibrary() {
+  // playlists
+  const grid = $('#pl-grid');
+  grid.innerHTML = '';
+  state.playlists.forEach((p, i) => {
+    const d = document.createElement('div');
+    d.className = 'pl';
+    d.innerHTML = `<div class="cover ${SONGS[i % 6].cover}">${noteSvg(100)}</div>
+      <div class="nm">${p.name}</div><div class="ct">${p.songs.length} song${p.songs.length === 1 ? '' : 's'}</div>`;
+    d.addEventListener('click', () => {
+      if (!p.songs.length) { toast('Playlist is empty — add songs with the + button'); return; }
+      playSong(p.songs[0]);
+      toast('Playing “' + p.name + '”');
+    });
+    grid.appendChild(d);
+  });
+  const nw = document.createElement('div');
+  nw.className = 'pl newpl';
+  nw.innerHTML = `<svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#C4B5FD" stroke-width="2.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    <div style="font-size:28px; font-weight:800; color:#C4B5FD;">Create playlist</div>`;
+  nw.addEventListener('click', () => { openPlSheet('s1'); });
+  grid.appendChild(nw);
+
+  // downloads
+  const dlist = $('#lib-downloads');
+  dlist.innerHTML = '';
+  const dl = allSongs().filter(s => state.downloaded.includes(s.id));
+  if (!dl.length) { dlist.innerHTML = '<div class="empty">Nothing downloaded yet — tap Download on any song to save it for offline.</div>'; }
+  dl.forEach(s => dlist.appendChild(songRow(s)));
+
+  // liked
+  const llist = $('#lib-liked');
+  llist.innerHTML = '';
+  const lk = allSongs().filter(s => state.liked.includes(s.id));
+  if (!lk.length) { llist.innerHTML = '<div class="empty">Songs you tap “Save” on in the player will appear here.</div>'; }
+  lk.forEach(s => llist.appendChild(songRow(s)));
+}
+
+function renderPlayer() {
+  const s = songById(state.current) || SONGS[0];
+  const art = $('#player-art');
+  art.className = 'art ' + s.cover;
+  art.innerHTML = `<div class="rings"></div><div class="note">${noteSvg(330)}</div>`;
+  $('#player-title').textContent = s.title;
+  $('#player-sub').textContent = s.artist + (s.uploaded ? ' · your upload' : ' · INSTEAD');
+  const liked = state.liked.includes(s.id);
+  const saved = state.downloaded.includes(s.id);
+  $('#save-btn').innerHTML = liked
+    ? `<svg width="46" height="46" viewBox="0 0 24 24" fill="url(#gnav)"><path d="M12 21s-7.5-4.7-10-9.3C.6 8.6 2.6 5 6.2 5c2 0 3.6 1.1 4.4 2.7l1.4 2.6 1.4-2.6C14.2 6.1 15.8 5 17.8 5c3.6 0 5.6 3.6 4.2 6.7C19.5 16.3 12 21 12 21z"/></svg>`
+    : `<svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="#F2F5FA" stroke-width="2.4" stroke-linejoin="round"><path d="M12 21s-7.5-4.7-10-9.3C.6 8.6 2.6 5 6.2 5c2 0 3.6 1.1 4.4 2.7l1.4 2.6 1.4-2.6C14.2 6.1 15.8 5 17.8 5c3.6 0 5.6 3.6 4.2 6.7C19.5 16.3 12 21 12 21z"/></svg>`;
+  $('#save-btn').parentElement.classList.toggle('hot', liked);
+  $('#dl-btn').innerHTML = saved
+    ? `<svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="#A3E635" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 16.2l-3.5-3.5L4 14.2 9 19.2 20 8.2l-1.5-1.5z"/></svg>`
+    : `<svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="#F2F5FA" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 20h14"/></svg>`;
+  $('#dl-label').textContent = saved ? 'Saved' : 'Download';
+  updatePlayIcon();
+  renderHome();
+}
+
+function updatePlayIcon() {
+  $('#play-btn').innerHTML = state.playing
+    ? `<svg width="72" height="72" viewBox="0 0 24 24" fill="#071018"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>`
+    : `<svg width="72" height="72" viewBox="0 0 24 24" fill="#071018"><path d="M7 4.8v14.4L19.5 12z"/></svg>`;
+}
+
+/* ---------------- playback ---------------- */
+function playSong(id) {
+  const s = songById(id);
+  if (!s) return;
+  state.current = id;
+  state.playing = true;
+  clearInterval(state.simTimer);
+  state.posMs = 0; state.durMs = 0;
+  if (s.path && AND) AND.playPath(s.path, s.title);
+  else if (AND) AND.play(s.file, s.title);
+  else { state.durMs = 21000; simulate(); }         // browser demo mode
+  show('player');
+  renderPlayer();
+}
+
+function simulate() {
+  clearInterval(state.simTimer);
+  state.simTimer = setInterval(() => {
+    if (!state.playing) return;
+    state.posMs += 500;
+    if (state.posMs >= state.durMs) onEnded();
+    else onProgress(state.posMs, state.durMs);
+  }, 500);
+}
+
+function togglePlay() {
+  const s = songById(state.current);
+  if (!s) { playSong(SONGS[0].id); return; }
+  state.playing = !state.playing;
+  if (state.playing) { if (AND) AND.resume(); else if (!state.durMs) { state.durMs = 21000; } simulate(); }
+  else { if (AND) AND.pause(); clearInterval(state.simTimer); }
+  updatePlayIcon();
+  renderHome();
+}
+
+function nextSong(dir = 1) {
+  const list = allSongs();
+  const i = list.findIndex(s => s.id === state.current);
+  const n = list[(i + dir + list.length) % list.length];
+  playSong(n.id);
+}
+
+function onEnded() {
+  const s = songById(state.current);
+  if (s) s.plays = 'just played';
+  nextSong(1);
+}
+window.app.onEnded = onEnded;
+
+function fmt(ms) {
+  const t = Math.floor(ms / 1000);
+  return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
+}
+function onProgress(pos, dur) {
+  state.posMs = pos; state.durMs = dur;
+  const pct = dur ? Math.min(100, (pos / dur) * 100) : 0;
+  $('#seek-fill').style.width = pct + '%';
+  $('#t-now').textContent = fmt(pos);
+  $('#t-dur').textContent = '-' + fmt(Math.max(0, dur - pos));
+}
+window.app.onProgress = onProgress;
+
+/* ---------------- share ---------------- */
+let shareSong = null;
+function openShare() {
+  const s = songById(state.current) || SONGS[0];
+  shareSong = s;
+  $('#share-title').textContent = 'Share “' + s.title + '”';
+  $('#share-url').textContent = 'instead.app/s/' + slug(s.title);
+  $('#dimmer').classList.add('on');
+  $('#share-sheet').classList.add('on');
+}
+function closeSheets() {
+  $('#dimmer').classList.remove('on');
+  $('#share-sheet').classList.remove('on');
+  $('#pl-sheet').classList.remove('on');
+}
+$$('#share-sheet .sapp').forEach(el => el.addEventListener('click', () => {
+  const s = shareSong; if (!s) return;
+  const text = `🎧 Listen to “${s.title}” by ${s.artist} on INSTEAD — upload your sound, let the world listen!\nhttps://instead.app/s/${slug(s.title)}`;
+  const kind = el.dataset.share;
+  if (kind === 'copy') {
+    navigator.clipboard && navigator.clipboard.writeText(text).catch(() => {});
+    toast('Link copied to clipboard');
+  } else if (AND) { AND.share(text); }
+  else { toast('(In the app this opens the Android share menu)'); }
+  closeSheets();
+}));
+$('#dimmer').addEventListener('click', closeSheets);
+
+/* ---------------- playlists ---------------- */
+let plTarget = null;
+function openPlSheet(songId) {
+  plTarget = songId;
+  const rows = $('#pl-rows');
+  rows.innerHTML = '';
+  if (!state.playlists.length) rows.innerHTML = '<div class="sub" style="padding:16px 0;">No playlists yet — create one below.</div>';
+  state.playlists.forEach(p => {
+    const d = document.createElement('div');
+    d.className = 'plrow';
+    d.innerHTML = `<div class="cover ${SONGS[0].cover}" style="width:70px;height:70px;">${noteSvg(34)}</div> ${p.name} <span class="cnt">${p.songs.length} songs</span>`;
+    d.onclick = () => {
+      if (!p.songs.includes(plTarget)) p.songs.push(plTarget);
+      store.set('playlists', state.playlists);
+      toast('Added to “' + p.name + '”');
+      closeSheets(); renderLibrary();
+    };
+    rows.appendChild(d);
+  });
+  $('#pl-sheet').classList.add('on');
+  $('#dimmer').classList.add('on');
+}
+$('#newpl-btn').addEventListener('click', () => {
+  const name = $('#newpl-name').value.trim() || 'My Playlist';
+  const p = { name, songs: plTarget ? [plTarget] : [] };
+  state.playlists.push(p);
+  store.set('playlists', state.playlists);
+  $('#newpl-name').value = '';
+  toast('Playlist “' + name + '” created');
+  closeSheets(); renderLibrary();
+});
+document.addEventListener('click', e => {
+  const add = e.target.closest('[data-addpl]');
+  if (add) { e.stopPropagation(); openPlSheet(add.dataset.addpl); }
+});
+
+/* ---------------- download ---------------- */
+function downloadCurrent() {
+  const s = songById(state.current); if (!s) return;
+  if (s.uploaded) { toast('Your upload is already on this device'); return; }
+  if (AND) AND.download(s.file);
+  else toast('Saved for offline (demo mode)');
+  if (!state.downloaded.includes(s.id)) state.downloaded.push(s.id);
+  store.set('downloaded', state.downloaded);
+  renderPlayer(); renderLibrary();
+}
+
+/* ---------------- upload flow ---------------- */
+$('#dropzone').addEventListener('click', () => $('#file-input').click());
+
+$('#file-input').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  beginUpload(f.name, f.size);
+  if (!AND) finishUploadDemo(f.name);
+});
+
+window.app.onFilePicked = function (uri, name) {
+  beginUpload(name, 0);
+  state.uploading.path = uri;
+  $('#up-size').textContent = 'imported from device';
+  runUpProgress(1400);
+};
+
+function beginUpload(name, size) {
+  const title = name.replace(/\.[a-z0-9]+$/i, '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  $('#up-title').textContent = title;
+  $('#up-file').textContent = name;
+  $('#up-size').textContent = size ? (size / 1048576).toFixed(1) + ' MB' : 'importing…';
+  $('#upbar').style.display = 'block';
+  $('#publish-btn').disabled = false;
+  state.uploading = { title, name, size };
+  $('#up-status').textContent = 'Uploading…';
+}
+
+function runUpProgress(ms) {
+  const t0 = performance.now();
+  const tick = () => {
+    const p = Math.min(100, Math.round(((performance.now() - t0) / ms) * 100));
+    $('#up-fill').style.width = p + '%';
+    $('#up-pct').textContent = p + '%';
+    if (p < 100) requestAnimationFrame(tick);
+    else { $('#up-status').textContent = 'Ready to publish'; $('#up-pct').textContent = '✓'; }
+  };
+  requestAnimationFrame(tick);
+}
+
+function finishUploadDemo(name) {
+  const t0 = performance.now();
+  const tick = () => {
+    const p = Math.min(100, Math.round(((performance.now() - t0) / 1600) * 100));
+    $('#up-fill').style.width = p + '%'; $('#up-pct').textContent = p + '%';
+    if (p < 100) requestAnimationFrame(tick);
+    else { $('#up-status').textContent = 'Ready to publish'; $('#up-pct').textContent = '✓'; }
+  };
+  requestAnimationFrame(tick);
+}
+
+$('#publish-btn').addEventListener('click', () => {
+  if (!state.uploading) { toast('Pick a track first'); return; }
+  const id = 'u' + Date.now();
+  state.uploads.push({
+    id, title: state.uploading.title, artist: 'You', genre: 'Your uploads',
+    file: state.uploading.path ? null : SONGS[Math.floor(Math.random() * 6)].file,
+    path: state.uploading.path || null, cover: 'c' + (1 + Math.floor(Math.random() * 6)),
+    plays: 'new upload', uploaded: true,
+  });
+  store.set('uploads', state.uploads);
+  toast('“' + state.uploading.title + '” published to your INSTEAD');
+  state.uploading = null;
+  $('#up-title').textContent = '—'; $('#upbar').style.display = 'none';
+  $('#publish-btn').disabled = true;
+  renderHome(); renderLibrary(); show('library');
+});
+
+/* ---------------- player wiring ---------------- */
+$('#play-btn').addEventListener('click', togglePlay);
+$('#next-btn').addEventListener('click', () => nextSong(1));
+$('#prev-btn').addEventListener('click', () => nextSong(-1));
+$('#act-share').addEventListener('click', openShare);
+$('#act-download').addEventListener('click', downloadCurrent);
+$('#act-save').addEventListener('click', () => {
+  const s = songById(state.current); if (!s) return;
+  const i = state.liked.indexOf(s.id);
+  if (i >= 0) { state.liked.splice(i, 1); toast('Removed from saved'); }
+  else { state.liked.push(s.id); toast('Saved to your library'); }
+  store.set('liked', state.liked);
+  renderPlayer(); renderLibrary();
+});
+$('#nav-player').addEventListener('click', () => show('player'));
+
+/* library tabs */
+$$('.tab').forEach(t => t.addEventListener('click', () => {
+  $$('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  const tab = t.dataset.tab;
+  $('#lib-playlists').style.display = tab === 'liked' ? 'none' : 'block';
+  $('#lib-liked').style.display = tab === 'liked' ? 'block' : 'none';
+}));
+
+/* search input */
+$('#search-input').addEventListener('input', renderSearch);
+
+/* ---------------- boot ---------------- */
+fit();
+renderHome(); renderSearch(); renderLibrary();
+renderPlayer();
+state.current = null; state.playing = false; updatePlayIcon(); renderHome();
+
+/* deep link for testing: index.html#player */
+if (location.hash && location.hash.length > 1) {
+  const s = location.hash.slice(1);
+  if ($('#screen-' + s)) show(s);
+}
+
+===FILE:app/build.gradle===
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.cortex.instead'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.cortex.instead"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+===FILE:build.gradle===
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
+
+===FILE:settings.gradle===
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "INSTEAD"
+include ':app'
+
+===FILE:gen_assets.py===
+#!/usr/bin/env python3
+"""Generates the launcher icon (PNG) and sample audio (WAV) for the INSTEAD app.
+Run before building. Pure stdlib for audio; Pillow for the icon."""
+import math
+import os
+import random
+import struct
+import wave
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+AUDIO_DIR = os.path.join(ROOT, 'app', 'src', 'main', 'assets', 'app', 'audio')
+ICON_PATH = os.path.join(ROOT, 'app', 'src', 'main', 'res', 'mipmap-xxxhdpi', 'ic_launcher.png')
+SR = 22050
+
+# ---------------- audio ----------------
+NOTES = {
+    'C3': 130.81, 'D3': 146.83, 'E3': 164.81, 'F3': 174.61, 'G3': 196.00, 'A3': 220.00, 'B3': 246.94,
+    'C4': 261.63, 'D4': 293.66, 'E4': 329.63, 'F4': 349.23, 'G4': 392.00, 'A4': 440.00, 'B4': 493.88,
+    'C5': 523.25, 'D5': 587.33, 'E5': 659.25, 'F5': 698.46, 'G5': 783.99, 'A5': 880.00, 'B5': 987.77,
+}
+
+def render_track(chords, melody, bpm, bars, seed, wave_shape='sine', swing=0.0):
+    rng = random.Random(seed)
+    beat = 60.0 / bpm
+    total = int(SR * beat * bars * 4)
+    buf = [0.0] * total
+
+    def add(start, freq, dur, vol, shape):
+        s = int(start * SR)
+        n = int(dur * SR)
+        for i in range(n):
+            if s + i >= total: break
+            t = i / SR
+            ph = t * freq
+            if shape == 'square':
+                v = 1.0 if math.sin(2 * math.pi * ph) >= 0 else -1.0
+            elif shape == 'tri':
+                v = 2.0 * (ph % 1.0) - 1.0
+            else:
+                v = math.sin(2 * math.pi * ph)
+            env = min(1.0, t * 20, (dur - t) * 12)
+            buf[s + i] += v * vol * env
+
+    for bar in range(bars):
+        chord = chords[bar % len(chords)]
+        t0 = bar * beat * 4
+        for f in chord:
+            add(t0, NOTES[f], beat * 3.9, 0.16, 'tri')
+
+    for bar in range(bars):
+        t0 = bar * beat * 4
+        for step in range(8):
+            if rng.random() < 0.28: continue
+            f = melody[(bar * 8 + step) % len(melody)]
+            swing_off = (beat * 0.5 * swing) if step % 2 == 1 else 0.0
+            add(t0 + step * beat * 0.5 + swing_off, NOTES[f], beat * 0.46, 0.34, wave_shape)
+
+    for bar in range(bars):
+        chord = chords[bar % len(chords)]
+        t0 = bar * beat * 4
+        for beat_i in range(4):
+            add(t0 + beat_i * beat, NOTES[chord[0]] / 2, beat * 0.9, 0.22, 'sine')
+
+    for bar in range(bars):
+        for step in range(8):
+            t = int((bar * beat * 4 + step * beat * 0.5) * SR)
+            for k in range(60):
+                if t + k < total:
+                    buf[t + k] += (rng.random() * 2 - 1) * 0.05 * (1 - k / 60)
+
+    fade = int(SR * 1.2)
+    for i in range(fade):
+        j = total - 1 - i
+        buf[j] *= i / fade
+    peak = max(1e-6, max(abs(x) for x in buf))
+    scale = 0.82 / peak
+    return [x * scale for x in buf]
+
+def write_wav(path, samples):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with wave.open(path, 'w') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(b''.join(struct.pack('<h', max(-32767, min(32767, int(x * 32767)))) for x in samples))
+    print('wrote', path, os.path.getsize(path) // 1024, 'KB')
+
+TRACKS = [
+    ('midnight_monsoon.wav', [['C3','E3','G3'],['A3','C4','E4'],['F3','A3','C4'],['G3','B3','D4']],
+     ['E4','G4','A4','G4','E4','D4','C4','E4'], 84, 12, 1, 'sine', 0.18),
+    ('chai_at_3am.wav', [['D3','F3','A3'],['B3','D4','F4'],['G3','B3','D4'],['A3','C4','E4']],
+     ['F4','A4','B4','A4','F4','D4','E4','F4'], 96, 10, 2, 'tri', 0.1),
+    ('neon_bazaar.wav', [['E3','G3','B3'],['D3','F3','A3'],['E3','G3','B3'],['C3','E3','G3']],
+     ['E5','D5','B4','E5','G5','B4','D5','E5'], 118, 14, 3, 'square', 0.0),
+    ('rooftop_rain.wav', [['A3','C4','E4'],['F3','A3','C4'],['C3','E3','G3'],['G3','B3','D4']],
+     ['C5','B4','A4','G4','A4','C5','E5','D5'], 70, 12, 4, 'sine', 0.22),
+    ('highway_gully.wav', [['F3','A3','C4'],['F3','A3','C4'],['G3','B3','D4'],['A3','C4','E4']],
+     ['F4','F4','A4','C5','A4','F4','G4','A4'], 102, 12, 5, 'square', 0.05),
+    ('desi_downtempo.wav', [['D3','A3','D4'],['C3','G3','C4'],['B3','F3','B3'],['G3','D4','G4']],
+     ['D5','C5','B4','A4','B4','C5','D5','A4'], 92, 12, 6, 'tri', 0.15),
+]
+
+for name, chords, melody, bpm, bars, seed, shape, swing in TRACKS:
+    write_wav(os.path.join(AUDIO_DIR, name), render_track(chords, melody, bpm, bars, seed, shape, swing))
+
+# ---------------- launcher icon ----------------
+from PIL import Image, ImageDraw
+
+S = 512
+c1 = (139, 92, 246)
+c2 = (34, 211, 238)
+
+img = Image.new('RGBA', (S, S))
+px = img.load()
+for y in range(S):
+    for x in range(S):
+        f = (x + y) / (2.0 * S)
+        px[x, y] = (int(c1[0] * (1 - f) + c2[0] * f),
+                    int(c1[1] * (1 - f) + c2[1] * f),
+                    int(c1[2] * (1 - f) + c2[2] * f),
+                    255)
+
+canvas = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+mask = Image.new('L', (S, S), 0)
+md = ImageDraw.Draw(mask)
+md.rounded_rectangle([0, 0, S, S], radius=118, fill=255)
+canvas.paste(img, (0, 0), mask)
+
+d = ImageDraw.Draw(canvas)
+dark = (7, 16, 24, 255)
+LW = 40
+x1, x2 = 186, 326
+top = 140
+b1, b2 = 372, 352
+d.line([(x1, top), (x1, b1 - 18)], fill=dark, width=LW)
+d.line([(x2, top), (x2, b2 - 18)], fill=dark, width=LW)
+d.rectangle([x1 - LW // 2, top, x2 + LW // 2, top + 46], fill=dark)
+d.ellipse([x1 - 58, b1, x1 + 58, b1 + 78], fill=dark)
+d.ellipse([x2 - 58, b2, x2 + 58, b2 + 78], fill=dark)
+
+os.makedirs(os.path.dirname(ICON_PATH), exist_ok=True)
+canvas.save(ICON_PATH)
+print('wrote', ICON_PATH, os.path.getsize(ICON_PATH), 'bytes')
