@@ -27,7 +27,9 @@ jobs:
               it = iter(parts[1:])
               for name, content in zip(it, it):
                   name = name.strip()
-                  os.makedirs(os.path.dirname(name), exist_ok=True)
+                  d = os.path.dirname(name)
+                  if d:
+                      os.makedirs(d, exist_ok=True)
                   with open(name, 'w') as f:
                       f.write(content.lstrip('\n'))
                   print('wrote', name)
