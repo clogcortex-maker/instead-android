@@ -1,0 +1,72 @@
+name: Build APK
+
+on:
+  push:
+    paths:
+      - 'app-bundle*.txt'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack sources
+        run: |
+          python3 - <<'EOF'
+          import re, os, glob
+          n = 0
+          for bundle_path in sorted(glob.glob('app-bundle*.txt')):
+              bundle = open(bundle_path).read()
+              parts = re.split(r'^===FILE:(.+)===$', bundle, flags=re.M)
+              it = iter(parts[1:])
+              for name, content in zip(it, it):
+                  name = name.strip()
+                  os.makedirs(os.path.dirname(name), exist_ok=True)
+                  with open(name, 'w') as f:
+                      f.write(content.lstrip('\n'))
+                  print('wrote', name)
+                  n += 1
+          assert n >= 10, 'expected at least 10 files, got %d' % n
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate audio + launcher icon
+        run: |
+          pip install --quiet pillow
+          python3 gen_assets.py
+
+      - name: Build debug APK
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          gradle assembleDebug --no-daemon --stacktrace
+          ls -la app/build/outputs/apk/debug/
+
+      - name: Publish release
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk INSTEAD-v1.0.apk
+          gh release delete v1.0.0 --yes 2>/dev/null || true
+          git push origin :refs/tags/v1.0.0 2>/dev/null || true
+          gh release create v1.0.0 INSTEAD-v1.0.apk \
+            --title "INSTEAD v1.0" \
+            --notes "Working INSTEAD music app (debug APK). Install via Settings > Security > Unknown sources. Includes: play, search, library, playlists, upload your own tracks, download for offline, share, background playback."
+        env:
+          GH_TOKEN: ${{ github.token }}
